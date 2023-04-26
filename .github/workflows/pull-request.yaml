@@ -54,17 +54,120 @@ on:
         required: false
         type: boolean
         default: false
+      src-dir:
+        required: false
+        type: string
+        default: "src"
 
 jobs:
+  check-changes:
+    name: Check changes and previous workflow results
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request'
+      || github.event.review.state == 'approved'
+      || github.event.review.body == 'recheck'
+    outputs:
+      skip-func-tests: ${{ steps.skip-func-tests.outputs.skip }}
+      skip-lint-unit-tests: ${{ steps.skip-lint-unit-tests.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Get latest workflow info
+        id: latest-workflow
+        env:
+          CURRENT_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          function get_last_workflow() {
+            # get all previus workflows for "test_full.yml" file and current branch
+            _workflows=$(curl -H "Accept: application/vnd.github.v3+json" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/tests_full.yml/runs?branch=$CURRENT_BRANCH")
+            # clear unsupported characters
+            _workflows_safe=$(echo "$_workflows" | tr "\r" " " | tr "\n" " " | tr "\t" " ")
+            # select previous (current is with index 0) workflow
+            _last_workflow=$(echo "$_workflows_safe" | jq -c '.workflow_runs[1]')
+            echo "$_last_workflow"
+          }
+          # get last workflow
+          workflow=$(get_last_workflow)
+          # wait (max is 60min) if the last workflow is still running
+          max_time=$((SECONDS+60*60))
+          while [[ "$workflow" != "null" && "$(echo $workflow | jq -r '.status')" != "completed" && $SECONDS -lt $max_time ]];
+          do
+            workflow=$(get_last_workflow)
+            echo "Waiting for workflow + $(echo $workflow | jq -r '.id')"
+            sleep 20
+          done
+          # define an empty value if the workflow is not found
+          if [[ -z "$workflow" ]]; then
+            workflow='{"head_sha": "", "status": "", "conclusion": ""}'
+          fi
+          echo "workflow=$workflow" >> $GITHUB_OUTPUT
+          echo "workflow=$workflow"
+      - name: Check to see if there is any new commit
+        id: new-commit
+        env:
+          LATEST_HEAD_SHA: ${{ fromJson(steps.latest-workflow.outputs.workflow).head_sha }}
+          CURRENT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$LATEST_HEAD_SHA" != "$CURRENT_SHA" ]
+          then
+            echo "new=1" >> $GITHUB_OUTPUT
+            echo "There's a new commit."
+          else
+            echo "new=0" >> $GITHUB_OUTPUT
+            echo "There is no new commit."
+          fi
+      - name: Track changed files in the PR for functional tests
+        id: skip-func-tests
+        run: |
+          git remote add upstream $GITHUB_SERVER_URL/$GITHUB_REPOSITORY
+          git fetch upstream 
+
+          # infer the upstream repo's default branch
+          if git branch -r | grep upstream/main
+          then
+            export DEFAULT_BRANCH="upstream/main"
+          else
+            export DEFAULT_BRANCH="upstream/master"
+          fi
+          echo $DEFAULT_BRANCH
+
+          skip=0
+          git diff --name-only $DEFAULT_BRANCH | grep -qE "^($SRC_DIR/|tests/functional/)" || skip=1
+          echo "skip=$skip" >> $GITHUB_OUTPUT
+          echo "skip=$skip"
+          if [ $skip == 0 ]
+          then
+            echo "The code base or function test code has changed."
+          else
+            echo "No changes were found."
+          fi
+        env:
+          SRC_DIR: ${{inputs.src-dir}}
+      - name: Skip lint and unit tests
+        id: skip-lint-unit-tests
+        env:
+          WORKFLOW_STATUS: ${{ fromJson(steps.latest-workflow.outputs.workflow).status }}
+          WORKFLOW_CONCLUSION: ${{ fromJson(steps.latest-workflow.outputs.workflow).conclusion }}
+          NEW_COMMIT: ${{ steps.new-commit.outputs.new }}
+        run: |
+          if [[ $WORKFLOW_STATUS == 'completed' && $WORKFLOW_CONCLUSION == 'success' && $NEW_COMMIT == 0 ]]; then
+            echo "Lint, Unit tests, Docs and Build will be skipped"
+            echo "skip=1" >> $GITHUB_OUTPUT
+          else
+            echo "Lint, Unit tests, Docs and Build will be run"
+            echo "skip=0" >> $GITHUB_OUTPUT
+          fi
+
   lint-unit:
     name: Lint checkers and unit tests
     uses: ./.github/workflows/_lint-unit.yaml
+    needs:
+    - check-changes
     # Note(rgildein): Lint checkers and unit tests should be triggered on any pull requested,
     # approval pull request, review was submitted or review comment with recheck.
     if: |
-      github.event_name == 'pull_request' ||
-      github.event.review.state == 'approved' ||
-      github.event.review.body == 'recheck'
+      needs.check-changes.outputs.skip-lint-unit-tests == 0
+      || github.event.review.body == 'recheck'
     secrets: inherit
     with:
       python-version: ${{ inputs.python-version-unit }}
@@ -73,13 +176,13 @@ jobs:
 
   func:
     uses: ./.github/workflows/_func.yaml
-    needs: 
+    needs:
     - lint-unit
     # Note(rgildein): Functional tests should be triggered only for commits to
     # master/main branch, if PR was approved or review comment with recheck
     if: |
-      contains(fromJson('["main", "master"]'), github.event.ref_name) ||
-      github.event.review.state == 'approved' ||
+      contains(fromJson('["main", "master"]'), github.ref_name) ||
+      needs.check-changes.outputs.skip-func-tests == 0 ||
       github.event.review.body == 'recheck'
     secrets: inherit
     with:
