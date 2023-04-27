@@ -54,17 +54,39 @@ on:
         required: false
         type: boolean
         default: false
+      src-dir:
+        required: false
+        type: string
+        default: "src"
 
 jobs:
+  check-changes:
+    name: Check changes and previous workflow results
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request'
+      || github.event.review.state == 'approved'
+      || github.event.review.body == 'recheck'
+    outputs:
+      skip-func-tests: ${{ steps.check-skip.outputs.skip-func-tests }}
+      skip-lint-unit-tests: ${{ steps.check-skip.outputs.skip-lint-unit-tests }}
+    steps:
+      - uses: actions/checkout@v3
+      - id: check-skip
+        uses: agileshaw/check-skip-test@v1
+        with:
+          src-dir: ${{ inputs.src-dir }}
+
   lint-unit:
     name: Lint checkers and unit tests
     uses: ./.github/workflows/_lint-unit.yaml
+    needs:
+    - check-changes
     # Note(rgildein): Lint checkers and unit tests should be triggered on any pull requested,
     # approval pull request, review was submitted or review comment with recheck.
     if: |
-      github.event_name == 'pull_request' ||
-      github.event.review.state == 'approved' ||
-      github.event.review.body == 'recheck'
+      needs.check-changes.outputs.skip-lint-unit-tests == 0
+      || github.event.review.body == 'recheck'
     secrets: inherit
     with:
       python-version: ${{ inputs.python-version-unit }}
@@ -73,13 +95,13 @@ jobs:
 
   func:
     uses: ./.github/workflows/_func.yaml
-    needs: 
+    needs:
     - lint-unit
     # Note(rgildein): Functional tests should be triggered only for commits to
     # master/main branch, if PR was approved or review comment with recheck
     if: |
-      contains(fromJson('["main", "master"]'), github.event.ref_name) ||
-      github.event.review.state == 'approved' ||
+      contains(fromJson('["main", "master"]'), github.ref_name) ||
+      needs.check-changes.outputs.skip-func-tests == 0 ||
       github.event.review.body == 'recheck'
     secrets: inherit
     with:
