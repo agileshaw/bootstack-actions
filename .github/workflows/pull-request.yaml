@@ -58,33 +58,47 @@ on:
 jobs:
   lint-unit:
     name: Lint checkers and unit tests
-    # Note(rgildein): Lint checkers and unit tests should be triggered on any pull requested,
-    # approval pull request, review was submitted or review comment with recheck.
-    if: |
-      github.event_name == 'pull_request' ||
-      github.event.review.state == 'approved' ||
-      github.event.review.body == 'recheck'
     secrets: inherit
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
-        command: ${{ fromJson(inputs.commands) }}
+        python-version: ${{ fromJson(inputs.python-version) }}
     steps:
-      - uses: actions/checkout@v3
-        with:
-          submodules: true
+    - uses: actions/checkout@v3
+      with:
+        submodules: true
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "tox${{ inputs.tox-version }}"
+    - name: Run lint checkers
+      working-directory: ${{ inputs.working-directory }}
+      run: tox -e lint
+    - name: Run unit tests
+      working-directory: ${{ inputs.working-directory }}
+      run: tox -e unit
+    - name: Save PR number to file
+      run: echo ${{ github.event.number }} > PR_NUMBER.txt
+    - name: Archive PR number
+      uses: actions/upload-artifact@v3
+      with:
+        name: PR_NUMBER
+        path: PR_NUMBER.txt
+    - name: Archive code coverage results
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report
+        path: ${{ inputs.working-directory }}/tests/unit/report/coverage.xml
+
   func:
-    needs: 
+    needs:
     - lint-unit
-    # Note(rgildein): Functional tests should be triggered only for commits to
-    # master/main branch, if PR was approved or review comment with recheck
-    if: |
-      contains(fromJson('["main", "master"]'), github.event.ref_name) ||
-      github.event.review.state == 'approved' ||
-      github.event.review.body == 'recheck'
-    secrets: inherit
+    name: Functional tests
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
@@ -95,3 +109,34 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: true
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install tox
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "tox${{ inputs.tox-version }}"
+      - name: Setup Juju environment
+        uses: charmed-kubernetes/actions-operator@main
+        with:
+          provider: ${{ inputs.provider }}
+      - name: Remove tox install by actions-operator
+        run: sudo apt remove tox -y
+      - name: Install snapcraft
+        if: ${{ inputs.snapcraft }}
+        run: sudo snap install snapcraft --classic
+      - name: Enabled nested LXD containers
+        if: ${{ inputs.provider == 'lxd' && inputs.nested-containers }}
+        run: |
+          # create new lxd project and configure nesting & privileged
+          lxc profile show default > default-lxc-profile.yaml
+          lxc project create nested-lxd
+          lxc profile edit --project nested-lxd default < default-lxc-profile.yaml
+          lxc profile set --project nested-lxd default security.nesting=true
+          lxc profile set --project nested-lxd default security.privileged=true
+          # set default project to be nested-lxd project
+          juju model-default project=nested-lxd
+      - name: Run tests with `${{ matrix.command }}`
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ matrix.command }}
