@@ -7,6 +7,13 @@ on:
         required: true
         description: "The name of the workflow that triggers sonar scan"
         type: string
+      report-dir:
+        required: false
+        description: |
+          The path to the report directory (relative to the root of the source repo).
+          This directory should be the same as specified in "sonar-project.properties".
+        type: string
+        default: tests/unit/report
 
 jobs:
   sonarcloud:
@@ -77,14 +84,17 @@ jobs:
         run: unzip artifact.zip
       - name: Fix code coverage paths
         working-directory: .
+        env:
+          REPORT_DIR: ${{ inputs.report-dir }}
         run: |
-            mkdir tests/unit/report
-            cp coverage.xml tests/unit/report/coverage.xml
+            if [ ! -d $REPORT_DIR ]; then
+              mkdir -p $REPORT_DIR
+            cp coverage.xml $REPORT_DIR/coverage.xml
       - name: SonarCloud Scan on PR
         if: github.event.workflow_run.event == 'pull_request'
         uses: SonarSource/sonarcloud-github-action@master
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           projectBaseDir: '.'
@@ -98,7 +108,7 @@ jobs:
         if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == ${{ github.event.workflow_run.head_repository.full_name }}
         uses: SonarSource/sonarcloud-github-action@master
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           projectBaseDir: '.'

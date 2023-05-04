@@ -11,3 +11,4 @@ jobs:
     secrets: inherit
     with:
       workflow-name: Test for PR workflow
+      report-dir: .
